@@ -246,6 +246,11 @@ label {
   color: #fff4dc;
 }
 
+.status[data-state="overflow"] {
+  background: #7f1d1d;
+  color: #fff6f4;
+}
+
 .live-detail,
 .live-note {
   color: var(--live-muted);
@@ -272,6 +277,18 @@ label {
 
 #live-cost {
   color: var(--gold);
+}
+
+.live-alert {
+  margin: 10px 0 0;
+  color: #ffd7d0;
+  font-size: 0.92rem;
+  font-weight: 700;
+}
+
+.live[data-overflow="true"] #live-cost {
+  color: #ffd7d0;
+  font-size: clamp(1.3rem, 4vw, 1.8rem);
 }
 
 .controls {

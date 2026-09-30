@@ -12,6 +12,7 @@ const {
   formatUSD,
   formatElapsed,
   canStart,
+  resolveInputs,
   createMeter
 } = meeting;
 
@@ -348,6 +349,175 @@ test('start and resume stay disabled until every field is valid', function () {
   assert.equal(canStart('idle', false), false);
   assert.equal(canStart('paused', false), false);
   assert.equal(canStart('running', false), false);
+});
+
+test('live cost overflow is explicit and does not cap the displayed amount', function () {
+  const { meter, at } = harness();
+  assert.equal(meter.setAttendees(1).ok, true);
+  assert.equal(meter.setHourlyCost(1e12).ok, true);
+  assert.equal(meter.setDurationMinutes(30).ok, true);
+  const safe = meter.getState();
+  assert.equal(safe.liveCostOverflow, false);
+  assert.ok(formatUSD(safe.projectedTotal).startsWith('$'));
+  assert.notEqual(formatUSD(1e16), '$90,071,992,547,409.91');
+  assert.equal(formatUSD(1e16), null);
+
+  meter.start();
+  at(60000);
+  const running = meter.getState();
+  assert.equal(running.status, 'running');
+  assert.equal(running.liveCostOverflow, false);
+  assert.ok(formatUSD(running.liveCost).startsWith('$'));
+
+  at(1e15);
+  const overflowed = meter.getState();
+  assert.equal(overflowed.liveCostOverflow, true);
+  assert.equal(overflowed.status, 'overflow');
+  assert.equal(overflowed.liveCost, null);
+  const frozenElapsed = overflowed.elapsedMs;
+  at(1e15 + 60000);
+  meter.start();
+  meter.pause();
+  const held = meter.getState();
+  assert.equal(held.status, 'overflow');
+  assert.equal(held.liveCost, null);
+  assert.equal(held.elapsedMs, frozenElapsed);
+  assert.equal(canStart('overflow', true), false);
+
+  const cleared = meter.reset();
+  assert.equal(cleared.status, 'idle');
+  assert.equal(cleared.liveCostOverflow, false);
+  assert.equal(formatUSD(cleared.liveCost), '$0.00');
+  assert.equal(formatElapsed(cleared.elapsedMs), '00:00:00');
+  assert.equal(cleared.hourlyCost, 1e12);
+});
+
+test('dependent inputs are revalidated together and accrued cost is preserved', function () {
+  const applied = { attendees: 5, hourlyCost: 100, durationMinutes: 30 };
+  const rejected = resolveInputs(applied, {
+    attendees: validateAttendees('5'),
+    hourly: validateHourlyCost('3e13'),
+    duration: validateDuration('30')
+  });
+  assert.equal(rejected.apply, false);
+  assert.match(rejected.fieldErrors.hourly, /too large/i);
+  assert.equal(rejected.fieldErrors.attendees, null);
+  assert.equal(rejected.values.hourlyCost, 100);
+
+  const stillTooMany = resolveInputs(applied, {
+    attendees: validateAttendees('4'),
+    hourly: validateHourlyCost('3e13'),
+    duration: validateDuration('30')
+  });
+  assert.equal(stillTooMany.apply, false);
+
+  const accepted = resolveInputs(applied, {
+    attendees: validateAttendees('1'),
+    hourly: validateHourlyCost('3e13'),
+    duration: validateDuration('30')
+  });
+  assert.equal(accepted.apply, true);
+  assert.equal(accepted.fieldErrors.hourly, null);
+  assert.equal(accepted.fieldErrors.attendees, null);
+  assert.equal(accepted.values.attendees, 1);
+  assert.equal(accepted.values.hourlyCost, 3e13);
+
+  const durationRejected = resolveInputs(applied, {
+    attendees: validateAttendees('5'),
+    hourly: validateHourlyCost('100'),
+    duration: validateDuration('1e16')
+  });
+  assert.equal(durationRejected.apply, false);
+  assert.match(durationRejected.fieldErrors.duration, /too large/i);
+  const durationRecovered = resolveInputs(applied, {
+    attendees: validateAttendees('5'),
+    hourly: validateHourlyCost('0'),
+    duration: validateDuration('1e16')
+  });
+  assert.equal(durationRecovered.apply, true);
+  assert.equal(durationRecovered.values.hourlyCost, 0);
+  assert.equal(durationRecovered.values.durationMinutes, 1e16);
+  assert.equal(durationRecovered.fieldErrors.duration, null);
+
+  const blankKept = resolveInputs(applied, {
+    attendees: validateAttendees('8'),
+    hourly: validateHourlyCost(''),
+    duration: validateDuration('45')
+  });
+  assert.equal(blankKept.apply, true);
+  assert.equal(blankKept.values.attendees, 8);
+  assert.equal(blankKept.values.hourlyCost, 100);
+  assert.equal(blankKept.values.durationMinutes, 45);
+  assert.match(blankKept.fieldErrors.hourly, /hourly/i);
+
+  const { meter, at } = harness();
+  meter.start();
+  at(60000);
+  assert.equal(meter.setHourlyCost('3e13').ok, false);
+  const before = meter.getState();
+  assert.equal(before.hourlyCost, 100);
+  assert.equal(before.liveCostOverflow, false);
+  at(90000);
+  const switched = meter.applyInputs(accepted.values);
+  assert.equal(switched.ok, true);
+  const atSwitch = meter.getState();
+  assert.equal(atSwitch.attendees, 1);
+  assert.equal(atSwitch.hourlyCost, 3e13);
+  assert.ok(Math.abs(atSwitch.liveCost - 12.5) < 1e-6);
+  assert.equal(formatUSD(atSwitch.projectedTotal), '$15,000,000,000,000.00');
+  assert.equal(formatUSD(atSwitch.costPerMinute), '$500,000,000,000.00');
+  at(150000);
+  const later = meter.getState();
+  assert.ok(Math.abs(later.liveCost - (12.5 + 3e13 / 60)) < 1);
+  assert.equal(later.status, 'running');
+});
+
+test('displayed currency rounds half cents up without changing internal precision', function () {
+  const { meter } = harness();
+  assert.equal(meter.setAttendees(1).ok, true);
+  assert.equal(meter.setHourlyCost(20.15).ok, true);
+  assert.equal(meter.setDurationMinutes(30).ok, true);
+  const state = meter.getState();
+  assert.ok(Math.abs(state.projectedTotal - 10.075) < 1e-9);
+  assert.notEqual(state.projectedTotal, 10.08);
+  assert.equal(formatUSD(state.projectedTotal), '$10.08');
+  assert.equal(formatUSD(state.costPerMinute), '$0.34');
+  assert.equal(formatUSD(10.075), '$10.08');
+  assert.equal(formatUSD(10.074), '$10.07');
+  assert.equal(formatUSD(1.005), '$1.01');
+  assert.equal(formatUSD(1.015), '$1.02');
+  assert.equal(formatUSD(1.004), '$1.00');
+  assert.equal(formatUSD(2.675), '$2.68');
+  assert.equal(formatUSD(0.005), '$0.01');
+});
+
+test('extreme numeric text keeps integer and sign meaning', function () {
+  const fractional = validateAttendees('1.0000000000000001');
+  assert.equal(fractional.ok, false);
+  assert.match(fractional.error, /fractional/i);
+  assert.equal(validateAttendees('1.0000000000000001e1').ok, false);
+  assert.equal(validateAttendees('5.0').ok, true);
+  assert.equal(validateAttendees('5.0').value, 5);
+  assert.equal(validateAttendees('1.5e1').ok, true);
+  assert.equal(validateAttendees('1.5e1').value, 15);
+
+  const negativeHourly = validateHourlyCost('-1e-999');
+  assert.equal(negativeHourly.ok, false);
+  assert.match(negativeHourly.error, /negative/i);
+  const negativeDuration = validateDuration('-1e-999');
+  assert.equal(negativeDuration.ok, false);
+  assert.match(negativeDuration.error, /negative/i);
+  assert.equal(validateAttendees('-1e-999').ok, false);
+  assert.equal(validateHourlyCost('-0').ok, true);
+  assert.equal(validateHourlyCost('-0').value, 0);
+  assert.equal(validateDuration('-0.0').ok, true);
+  assert.equal(validateDuration('-0.0').value, 0);
+
+  const { meter } = harness();
+  assert.equal(meter.setAttendees('1.0000000000000001').ok, false);
+  assert.equal(meter.getState().attendees, 5);
+  assert.equal(meter.setHourlyCost('-1e-999').ok, false);
+  assert.equal(meter.getState().hourlyCost, 100);
 });
 
 test('fractional duration is allowed and attendee fractions are not', function () {
