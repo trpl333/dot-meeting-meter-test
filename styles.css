@@ -308,6 +308,7 @@ label {
   cursor: not-allowed;
 }
 
+button:focus,
 button:focus-visible {
   outline: 3px solid var(--gold);
   outline-offset: 2px;
