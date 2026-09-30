@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Meeting Meter</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="page">
+    <header class="masthead">
+      <p class="kicker">Cost at a glance</p>
+      <h1>Meeting Meter</h1>
+      <p class="lede">See what a meeting costs while it is happening.</p>
+    </header>
+
+    <div class="layout">
+      <section class="panel" aria-labelledby="details-heading">
+        <h2 id="details-heading">Meeting details</h2>
+
+        <div class="field">
+          <label for="attendees">Number of attendees</label>
+          <div class="field-control">
+            <input id="attendees" name="attendees" type="text" inputmode="numeric" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="attendees-error" value="5">
+          </div>
+          <p id="attendees-error" class="error" hidden></p>
+        </div>
+
+        <div class="field">
+          <label for="hourly-cost">Average loaded hourly cost per attendee (USD)</label>
+          <div class="field-control">
+            <input id="hourly-cost" name="hourly-cost" type="text" inputmode="decimal" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="hourly-hint hourly-error" value="100.00">
+            <span class="unit">USD/hour</span>
+          </div>
+          <p id="hourly-hint" class="hint">Loaded hourly cost is the estimated hourly cost of one attendee, including salary and overhead.</p>
+          <p id="hourly-error" class="error" hidden></p>
+        </div>
+
+        <div class="field">
+          <label for="duration">Planned meeting duration (minutes)</label>
+          <div class="field-control">
+            <input id="duration" name="duration" type="text" inputmode="decimal" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="duration-error" value="30">
+            <span class="unit">minutes</span>
+          </div>
+          <p id="duration-error" class="error" hidden></p>
+        </div>
+
+        <p id="rate-hint" class="hint">Changing attendees or hourly cost affects future live cost only. Time already accrued stays put, and paused time is not counted.</p>
+        <p id="stale-note" class="notice" hidden>Displayed estimates still use the last valid values.</p>
+      </section>
+
+      <section class="panel panel-cost" aria-labelledby="cost-heading">
+        <h2 id="cost-heading">Cost</h2>
+
+        <div class="figure">
+          <p class="figure-label" id="projected-label">Projected total</p>
+          <p class="figure-value" id="projected-total" aria-labelledby="projected-label">$250.00</p>
+          <p class="figure-note">If the meeting lasts the planned duration. This is an estimate, not a countdown.</p>
+        </div>
+
+        <div class="figure figure-rate">
+          <p class="figure-label" id="rate-label">Cost per minute</p>
+          <p class="figure-value figure-value-small" id="cost-per-minute" aria-labelledby="rate-label">$8.33</p>
+          <p class="figure-note">For the whole meeting, everyone included.</p>
+        </div>
+
+        <div class="live">
+          <div class="live-top">
+            <h3 id="live-heading">Live meeting</h3>
+            <p id="status" class="status" data-state="idle" role="status">Idle</p>
+          </div>
+          <p id="status-detail" class="live-detail">Ready to start.</p>
+
+          <dl class="live-metrics">
+            <div>
+              <dt>Elapsed time</dt>
+              <dd id="elapsed">00:00:00</dd>
+            </div>
+            <div>
+              <dt>Live cost</dt>
+              <dd id="live-cost">$0.00</dd>
+            </div>
+          </dl>
+          <p class="live-note">Accrued only while the timer is running. This is separate from the projected total.</p>
+
+          <div class="controls" role="group" aria-label="Timer controls">
+            <button type="button" id="start">Start</button>
+            <button type="button" id="pause">Pause</button>
+            <button type="button" id="reset">Reset</button>
+          </div>
+          <p id="start-note" class="live-note" hidden>Start is unavailable until every field is valid. Pause and Reset still work.</p>
+        </div>
+      </section>
+    </div>
+  </main>
+  <script src="src/meeting.js"></script>
+  <script src="src/app.js"></script>
+</body>
+</html>
