@@ -10,6 +10,8 @@
 
   var MAX_SAFE_CENTS = 9007199254740991;
   var MAX_SAFE_CENTS_TEXT = String(MAX_SAFE_CENTS);
+  // Absolute power-of-ten scale we will build exactly. Beyond this, validation rejects the entry.
+  var MAX_DECIMAL_SCALE = 10000;
   var NUMERIC = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/;
 
   var DEFAULTS = {
@@ -158,10 +160,10 @@
     if (!parts || !parts.ok) {
       return null;
     }
-    if (parts.trueZero || parts.exponent === -Infinity) {
+    if (parts.trueZero) {
       return ratio(0n, 1n);
     }
-    if (parts.exponent === Infinity) {
+    if (parts.exponent === Infinity || parts.exponent === -Infinity) {
       return null;
     }
     var digits = (parts.intPart + parts.fracPart).replace(/^0+/, '') || '0';
@@ -169,10 +171,7 @@
       return ratio(0n, 1n);
     }
     var scale = parts.exponent - parts.fracPart.length;
-    if (scale < -(digits.length + 8)) {
-      return ratio(0n, 1n);
-    }
-    if (scale > 10000) {
+    if (scale > MAX_DECIMAL_SCALE || scale < -MAX_DECIMAL_SCALE) {
       return null;
     }
     var coefficient = BigInt(digits);
@@ -262,7 +261,7 @@
     if (exceedsSafeInteger(integerDigitString(parsed)) || !Number.isSafeInteger(numeric)) {
       return { ok: false, error: 'That attendee count is too large to calculate exactly.' };
     }
-    return finishDecimal(parsed, numeric, 'That attendee count is too large to calculate exactly.');
+    return finishDecimal(parsed, numeric, 'That attendee count is outside the supported range.');
   }
 
   function validateNonNegative(raw, messages) {
@@ -286,7 +285,7 @@
     if (numeric < 0) {
       return { ok: false, error: messages.negative };
     }
-    return finishDecimal(parsed, numeric, messages.nonfinite);
+    return finishDecimal(parsed, numeric, messages.range);
   }
 
   function validateHourlyCost(raw) {
@@ -294,7 +293,8 @@
       blank: 'Enter the hourly cost.',
       nonnumeric: 'Enter a numeric hourly cost.',
       nonfinite: 'Enter a finite hourly cost.',
-      negative: 'Hourly cost cannot be negative.'
+      negative: 'Hourly cost cannot be negative.',
+      range: 'This hourly cost is outside the supported range.'
     });
   }
 
@@ -303,7 +303,8 @@
       blank: 'Enter the planned duration.',
       nonnumeric: 'Enter a numeric duration in minutes.',
       nonfinite: 'Enter a finite duration.',
-      negative: 'Duration cannot be negative.'
+      negative: 'Duration cannot be negative.',
+      range: 'This duration is outside the supported range.'
     });
   }
 

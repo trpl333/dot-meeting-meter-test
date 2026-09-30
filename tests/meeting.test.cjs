@@ -784,3 +784,144 @@ test('fractional duration is allowed and attendee fractions are not', function (
   assert.equal(formatUSD(meter.getState().projectedTotal), '$254.17');
   assert.equal(formatUSD(meter.getState().costPerMinute), '$8.33');
 });
+
+function applySmallHourly(meter, attendees, hourly, minutes) {
+  assert.equal(meter.setHourlyCost(hourly).ok, true, String(hourly));
+  assert.equal(meter.setDurationMinutes(minutes).ok, true, String(minutes));
+  assert.equal(meter.setAttendees(attendees).ok, true, String(attendees));
+  return meter.getState();
+}
+
+function applyLargeHourly(meter, hourly, minutes) {
+  assert.equal(meter.setAttendees('1').ok, true);
+  assert.equal(meter.setHourlyCost(hourly).ok, true, String(hourly));
+  assert.equal(meter.setDurationMinutes(minutes).ok, true, String(minutes));
+  return meter.getState();
+}
+
+test('small nonzero decimals stay exact through projected, live, and segment costs', function () {
+  const source = fs.readFileSync(path.join(__dirname, '../src/meeting.js'), 'utf8');
+  assert.doesNotMatch(source, /digits\.length \+ 8/);
+
+  // 1e12 × 1e-10 / 60 = 5/3 per minute; × 30 minutes = $50.00. Display of 5/3 is $1.67.
+  const caseA = applySmallHourly(harness().meter, '1000000000000', '0.0000000001', '30');
+  assert.equal(caseA.costPerMinuteUSD, '$1.67');
+  assert.equal(caseA.projectedUSD, '$50.00');
+  assert.notEqual(caseA.projectedUSD, '$0.00');
+
+  const scientificA = applySmallHourly(harness().meter, '1e12', '1e-10', '3e1');
+  assert.equal(scientificA.costPerMinuteUSD, '$1.67');
+  assert.equal(scientificA.projectedUSD, '$50.00');
+
+  const { meter: liveMeter, at } = harness();
+  applySmallHourly(liveMeter, '1000000000000', '1e-10', '30');
+  liveMeter.start();
+  at(3600000);
+  const caseB = liveMeter.getState();
+  assert.equal(caseB.status, 'running');
+  assert.equal(formatElapsed(caseB.elapsedMs), '01:00:00');
+  assert.equal(caseB.liveCostUSD, '$100.00');
+  assert.notEqual(caseB.liveCostUSD, '$0.00');
+
+  // 6e13 / 60 × 1e-10 = $100.00.
+  const caseC = applyLargeHourly(harness().meter, '60000000000000', '0.0000000001');
+  assert.equal(caseC.projectedUSD, '$100.00');
+  const caseCScientific = applyLargeHourly(harness().meter, '6e13', '1e-10');
+  assert.equal(caseCScientific.projectedUSD, '$100.00');
+  assert.equal(caseCScientific.costPerMinuteUSD, '$1,000,000,000,000.00');
+
+  // 1e12 × 1e-9 / 60 = 50/3 → $16.67; × 30 = $500.00.
+  const billionth = applySmallHourly(harness().meter, '1e12', '1e-9', '30');
+  assert.equal(billionth.costPerMinuteUSD, '$16.67');
+  assert.equal(billionth.projectedUSD, '$500.00');
+  // 1e12 × 1e-12 / 60 = 1/60 → $0.02; × 30 = $0.50.
+  const trillionth = applySmallHourly(harness().meter, '1e12', '1e-12', '30');
+  assert.equal(trillionth.costPerMinuteUSD, '$0.02');
+  assert.equal(trillionth.projectedUSD, '$0.50');
+
+  // 6e13 / 60 × 1e-12 = $1.00; × 1e-9 = $1,000.00.
+  assert.equal(applyLargeHourly(harness().meter, '6e13', '1e-12').projectedUSD, '$1.00');
+  assert.equal(applyLargeHourly(harness().meter, '6e13', '1e-9').projectedUSD, '$1,000.00');
+
+  const { meter: segments, at: atSegment } = harness();
+  applySmallHourly(segments, '1e12', '1e-10', '30');
+  segments.start();
+  atSegment(20000);
+  assert.equal(segments.setHourlyCost('3e-10').ok, true);
+  assert.equal(segments.getState().liveCostUSD, '$0.56');
+  atSegment(40000);
+  assert.equal(segments.setHourlyCost('2e-10').ok, true);
+  assert.equal(segments.getState().liveCostUSD, '$2.22');
+  atSegment(60000);
+  const combined = segments.getState();
+  assert.equal(formatElapsed(combined.elapsedMs), '00:01:00');
+  assert.equal(combined.liveCostUSD, '$3.33');
+  assert.equal(combined.costPerMinuteUSD, '$3.33');
+
+  const { meter: switched, at: atSwitch } = harness();
+  applySmallHourly(switched, '1e12', '1e-10', '30');
+  switched.start();
+  atSwitch(30000);
+  assert.equal(switched.setHourlyCost('2e-10').ok, true);
+  assert.equal(switched.getState().liveCostUSD, '$0.83');
+  atSwitch(60000);
+  assert.equal(switched.getState().liveCostUSD, '$2.50');
+
+  const { meter: paused, at: atPause } = harness();
+  applySmallHourly(paused, '1e12', '0.0000000001', '30');
+  paused.start();
+  atPause(30000);
+  paused.pause();
+  assert.equal(paused.setHourlyCost('2e-10').ok, true);
+  atPause(90000);
+  assert.equal(paused.getState().liveCostUSD, '$0.83');
+  assert.equal(paused.getState().status, 'paused');
+  paused.start();
+  atPause(120000);
+  assert.equal(paused.getState().liveCostUSD, '$2.50');
+  assert.equal(formatElapsed(paused.getState().elapsedMs), '00:01:00');
+});
+
+test('exponent bounds reject unsupported scales instead of treating them as zero', function () {
+  const inside = validateHourlyCost('1e-10000');
+  assert.equal(inside.ok, true);
+  assert.equal(inside.decimal.num, 1n);
+  assert.equal(inside.decimal.den, 10n ** 10000n);
+
+  const underflow = validateHourlyCost('1e-400');
+  assert.equal(underflow.ok, true);
+  assert.equal(underflow.decimal.num, 1n);
+  assert.equal(underflow.decimal.den, 10n ** 400n);
+  assert.equal(validateDuration('1e-12').ok, true);
+  assert.notEqual(validateDuration('1e-12').decimal.num, 0n);
+
+  const below = validateHourlyCost('1e-10001');
+  assert.equal(below.ok, false);
+  assert.match(below.error, /supported range/i);
+  const durationBelow = validateDuration('1e-10001');
+  assert.equal(durationBelow.ok, false);
+  assert.match(durationBelow.error, /supported range/i);
+
+  const above = validateHourlyCost('1e+10001');
+  assert.equal(above.ok, false);
+  assert.match(above.error, /finite|supported range/i);
+  const durationAbove = validateDuration('1e+10000');
+  assert.equal(durationAbove.ok, false);
+
+  const { meter } = harness();
+  applySmallHourly(meter, '1e12', '1e-10', '30');
+  assert.equal(meter.setHourlyCost('1e-10001').ok, false);
+  assert.equal(meter.setDurationMinutes('1e-10001').ok, false);
+  assert.equal(meter.setHourlyCost('1e+10001').ok, false);
+  const kept = meter.getState();
+  assert.equal(kept.projectedUSD, '$50.00');
+  assert.equal(kept.costPerMinuteUSD, '$1.67');
+  assert.notEqual(kept.projectedUSD, '$0.00');
+
+  assert.equal(validateHourlyCost('-1e-999').ok, false);
+  assert.match(validateHourlyCost('-1e-999').error, /negative/i);
+  assert.equal(validateHourlyCost('-1e-10001').ok, false);
+  assert.match(validateHourlyCost('-1e-10001').error, /negative/i);
+  assert.equal(validateHourlyCost('0e-10001').ok, true);
+  assert.equal(validateHourlyCost('0e-10001').value, 0);
+});
