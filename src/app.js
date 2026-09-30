@@ -91,50 +91,33 @@
       });
     }
 
-    function showMoney(element, amount) {
-      var text = MeetingMeter.formatUSD(amount);
-      element.textContent = text == null ? 'Too large' : text;
+    function isMeterState(value) {
+      return !!value && typeof value.status === 'string' && typeof value.liveCostOverflow === 'boolean';
     }
 
-    function render() {
-      var state = meter.getState();
-      showMoney(projectedEl, state.projectedTotal);
-      showMoney(rateEl, state.costPerMinute);
-      elapsedEl.textContent = MeetingMeter.formatElapsed(state.elapsedMs);
-      if (state.liveCostOverflow) {
-        liveEl.textContent = 'Too large';
-        liveOverflowNote.hidden = false;
-        livePanel.dataset.overflow = 'true';
-      } else {
-        showMoney(liveEl, state.liveCost);
-        liveOverflowNote.hidden = true;
-        livePanel.dataset.overflow = 'false';
+    function render(state) {
+      if (!isMeterState(state)) {
+        state = meter.getState();
       }
-
-      var label = 'Idle';
-      var detail = 'Ready to start.';
-      if (state.status === 'running') {
-        label = 'Running';
-        detail = 'Accruing live cost. The planned duration will not stop the timer.';
-      } else if (state.status === 'paused') {
-        label = 'Paused';
-        detail = 'Frozen. Start continues from this elapsed time and cost.';
-      } else if (state.status === 'overflow') {
-        label = 'Stopped';
-        detail = 'Live cost is too large to display. Reset to start over.';
+      var view = MeetingMeter.describeLiveView(state, allValid());
+      projectedEl.textContent = view.projectedText;
+      rateEl.textContent = view.rateText;
+      elapsedEl.textContent = view.elapsedText;
+      liveEl.textContent = view.liveText;
+      liveOverflowNote.hidden = !view.overflowVisible;
+      livePanel.dataset.overflow = view.overflowVisible ? 'true' : 'false';
+      if (statusEl.textContent !== view.label) {
+        statusEl.textContent = view.label;
       }
-      if (statusEl.textContent !== label) {
-        statusEl.textContent = label;
-      }
-      statusEl.dataset.state = state.status;
-      if (statusDetailEl.textContent !== detail) {
-        statusDetailEl.textContent = detail;
+      statusEl.dataset.state = view.status;
+      if (statusDetailEl.textContent !== view.detail) {
+        statusDetailEl.textContent = view.detail;
       }
 
       var valid = allValid();
       staleNote.hidden = valid;
       startNote.hidden = valid;
-      startButton.disabled = !MeetingMeter.canStart(state.status, valid);
+      startButton.disabled = view.startDisabled;
     }
 
     Object.keys(fields).forEach(function (name) {
@@ -165,17 +148,7 @@
     document.addEventListener('visibilitychange', render);
     window.addEventListener('pageshow', render);
 
-    var followTimer = false;
-    window.setInterval(function () {
-      var status = meter.getState().status;
-      if (status === 'running') {
-        followTimer = true;
-        render();
-      } else if (followTimer) {
-        followTimer = false;
-        render();
-      }
-    }, TICK_MS);
+    window.setInterval(MeetingMeter.createDisplayTick(meter, render), TICK_MS);
 
     render();
   }

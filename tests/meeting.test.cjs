@@ -2,6 +2,8 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const meeting = require('../src/meeting.js');
 
 const {
@@ -478,16 +480,20 @@ test('displayed currency rounds half cents up without changing internal precisio
   assert.equal(meter.setHourlyCost(20.15).ok, true);
   assert.equal(meter.setDurationMinutes(30).ok, true);
   const state = meter.getState();
+  // 20.15 × 30 / 60 = 10.075 exactly, which half-up rounds to $10.08.
   assert.ok(Math.abs(state.projectedTotal - 10.075) < 1e-9);
   assert.notEqual(state.projectedTotal, 10.08);
-  assert.equal(formatUSD(state.projectedTotal), '$10.08');
-  assert.equal(formatUSD(state.costPerMinute), '$0.34');
-  assert.equal(formatUSD(10.075), '$10.08');
+  assert.equal(state.projectedUSD, '$10.08');
+  assert.equal(state.costPerMinuteUSD, '$0.34');
+  // The binary value of the literal 10.075 is slightly under that decimal,
+  // so one half-up of the float is $10.07. Display uses the decimal inputs.
+  assert.equal(formatUSD(state.projectedTotal), '$10.07');
+  assert.equal(formatUSD(10.075), '$10.07');
   assert.equal(formatUSD(10.074), '$10.07');
-  assert.equal(formatUSD(1.005), '$1.01');
-  assert.equal(formatUSD(1.015), '$1.02');
+  assert.equal(formatUSD(1.005), '$1.00');
+  assert.equal(formatUSD(1.015), '$1.01');
   assert.equal(formatUSD(1.004), '$1.00');
-  assert.equal(formatUSD(2.675), '$2.68');
+  assert.equal(formatUSD(2.675), '$2.67');
   assert.equal(formatUSD(0.005), '$0.01');
 });
 
@@ -518,6 +524,253 @@ test('extreme numeric text keeps integer and sign meaning', function () {
   assert.equal(meter.getState().attendees, 5);
   assert.equal(meter.setHourlyCost('-1e-999').ok, false);
   assert.equal(meter.getState().hourlyCost, 100);
+});
+
+function independentProjectedUSD(attendeesText, hourlyText, minutesText) {
+  function parse(text) {
+    const raw = String(text).trim();
+    const body = raw[0] === '+' || raw[0] === '-' ? raw.slice(1) : raw;
+    const match = body.match(/^(\d*)(?:\.(\d*))?(?:[eE]([+-]?\d+))?$/);
+    const digits = ((match[1] || '') + (match[2] || '')).replace(/^0+/, '') || '0';
+    const exp = (match[3] ? Number(match[3]) : 0) - (match[2] || '').length;
+    return { coeff: BigInt(digits), exp: exp };
+  }
+  const attendees = parse(attendeesText);
+  const hourly = parse(hourlyText);
+  const minutes = parse(minutesText);
+  const product = {
+    coeff: attendees.coeff * hourly.coeff * minutes.coeff,
+    exp: attendees.exp + hourly.exp + minutes.exp
+  };
+  let numerator = product.coeff;
+  let denominator = 60n;
+  const centScale = product.exp + 2;
+  if (centScale >= 0) {
+    numerator *= 10n ** BigInt(centScale);
+  } else {
+    denominator *= 10n ** BigInt(-centScale);
+  }
+  const quotient = numerator / denominator;
+  const remainder = numerator % denominator;
+  const cents = remainder * 2n >= denominator ? quotient + 1n : quotient;
+  const text = cents.toString().padStart(3, '0');
+  return '$' + text.slice(0, -2).replace(/\B(?=(\d{3})+(?!\d))/g, ',') + '.' + text.slice(-2);
+}
+
+function projectedDisplay(attendees, hourly, minutes) {
+  const { meter } = harness();
+  assert.equal(meter.setAttendees(attendees).ok, true, String(attendees));
+  assert.equal(meter.setHourlyCost(hourly).ok, true, String(hourly));
+  assert.equal(meter.setDurationMinutes(minutes).ok, true, String(minutes));
+  return meter.getState();
+}
+
+test('decimal inputs half-up to cents once, including the reported one-cent cases', function () {
+  const cases = [
+    ['1', '20.14999999992', '30', '$10.07'],
+    ['1', '2097152.01', '30', '$1,048,576.01'],
+    ['10001', '100.13', '30', '$500,700.07'],
+    ['1', '20.15', '30', '$10.08'],
+    ['1', '2.015e1', '30', '$10.08'],
+    ['1', '20.14', '30', '$10.07'],
+    ['1', '20.16', '30', '$10.08'],
+    ['1', '0.008', '30', '$0.00'],
+    ['1', '0.01', '30', '$0.01'],
+    ['1', '0.012', '30', '$0.01']
+  ];
+  cases.forEach(function (entry) {
+    const expected = entry[3];
+    assert.equal(independentProjectedUSD(entry[0], entry[1], entry[2]), expected, entry.join(' '));
+    const state = projectedDisplay(entry[0], entry[1], entry[2]);
+    assert.equal(state.projectedUSD, expected, entry.join(' '));
+  });
+
+  const justUnder = projectedDisplay('1', '20.14999999992', '30');
+  assert.equal(justUnder.projectedUSD, '$10.07');
+  assert.notEqual(formatUSD(justUnder.projectedTotal), '$10.08');
+
+  const powerOfTwoBoundary = projectedDisplay('1', '2097152.01', '30');
+  assert.equal(powerOfTwoBoundary.projectedUSD, '$1,048,576.01');
+  assert.equal(formatUSD(powerOfTwoBoundary.projectedTotal), '$1,048,576.00');
+
+  const groupBoundary = projectedDisplay('10001', '100.13', '30');
+  assert.equal(groupBoundary.projectedUSD, '$500,700.07');
+  assert.equal(formatUSD(groupBoundary.projectedTotal), '$500,700.06');
+
+  const kept = projectedDisplay(1, 20.15, 30);
+  assert.equal(kept.projectedUSD, '$10.08');
+  assert.equal(kept.costPerMinuteUSD, '$0.34');
+  assert.equal(formatUSD(kept.projectedTotal), '$10.07');
+});
+
+function armHighRate(meter) {
+  assert.equal(meter.setAttendees(1).ok, true);
+  assert.equal(meter.setHourlyCost('9e13').ok, true);
+  assert.equal(meter.setDurationMinutes(30).ok, true);
+}
+
+test('pause then resume paints overflow on the first timer callback', function () {
+  let time = 0;
+  const now = function () { return time; };
+  const fixed = createMeter({ now: now });
+  const buggy = createMeter({ now: now });
+  armHighRate(fixed);
+  armHighRate(buggy);
+  fixed.start();
+  buggy.start();
+  time = 3602800;
+
+  const fixedViews = [];
+  const fixedTick = meeting.createDisplayTick(fixed, function (state) {
+    fixedViews.push(meeting.describeLiveView(state, true));
+  });
+  const buggyViews = [];
+  let followTimer = false;
+  function buggyTick() {
+    const state = buggy.getState();
+    if (state.status === 'running') {
+      followTimer = true;
+      buggyViews.push(state.status);
+    } else if (followTimer) {
+      followTimer = false;
+      buggyViews.push(state.status);
+    }
+  }
+
+  fixedTick();
+  buggyTick();
+  assert.equal(fixedViews[fixedViews.length - 1].label, 'Running');
+  assert.equal(fixedViews[fixedViews.length - 1].liveText, '$90,070,000,000,000.00');
+  assert.equal(fixedViews[fixedViews.length - 1].overflowVisible, false);
+  assert.equal(fixedViews[fixedViews.length - 1].startDisabled, true);
+
+  fixed.pause();
+  buggy.pause();
+  fixedTick();
+  buggyTick();
+  assert.equal(fixedViews[fixedViews.length - 1].label, 'Paused');
+  assert.equal(fixedViews[fixedViews.length - 1].overflowVisible, false);
+  assert.equal(buggyViews[buggyViews.length - 1], 'paused');
+  assert.equal(followTimer, false);
+
+  fixed.start();
+  buggy.start();
+  time = 3603050;
+  fixedTick();
+  buggyTick();
+  const first = fixedViews[fixedViews.length - 1];
+  assert.equal(first.status, 'overflow');
+  assert.equal(first.label, 'Stopped');
+  assert.equal(first.liveText, 'Too large');
+  assert.equal(first.overflowVisible, true);
+  assert.equal(first.startDisabled, true);
+  assert.match(first.detail, /Reset to start over/);
+  assert.equal(buggy.getState().status, 'overflow');
+  assert.notEqual(buggyViews[buggyViews.length - 1], 'overflow');
+
+  const elapsed = fixed.getState().elapsedMs;
+  time = 3603050 + 5000;
+  fixedTick();
+  assert.equal(fixedViews[fixedViews.length - 1].status, 'overflow');
+  assert.equal(fixedViews[fixedViews.length - 1].liveText, 'Too large');
+  assert.equal(fixed.getState().elapsedMs, elapsed);
+  assert.notEqual(first.liveText, '$90,071,992,547,409.91');
+
+  const cleared = fixed.reset();
+  const resetView = meeting.describeLiveView(cleared, true);
+  assert.equal(resetView.status, 'idle');
+  assert.equal(resetView.label, 'Idle');
+  assert.equal(resetView.liveText, '$0.00');
+  assert.equal(resetView.overflowVisible, false);
+  assert.equal(resetView.startDisabled, false);
+  assert.equal(cleared.attendees, 1);
+  assert.equal(cleared.hourlyCost, 9e13);
+  assert.equal(cleared.durationMinutes, 30);
+});
+
+test('the first callback after start paints an immediate overflow', function () {
+  const { meter, at } = harness();
+  armHighRate(meter);
+  const views = [];
+  const tick = meeting.createDisplayTick(meter, function (state) {
+    views.push(meeting.describeLiveView(state, true));
+  });
+  meter.start();
+  at(3603050);
+  tick();
+  assert.equal(views.length, 1);
+  assert.equal(views[0].label, 'Stopped');
+  assert.equal(views[0].liveText, 'Too large');
+  assert.equal(views[0].overflowVisible, true);
+  assert.equal(views[0].startDisabled, true);
+  const elapsed = meter.getState().elapsedMs;
+  at(3603050 + 8000);
+  tick();
+  assert.equal(views.length, 2);
+  assert.equal(views[1].label, 'Stopped');
+  assert.equal(views[1].liveText, 'Too large');
+  assert.equal(meter.getState().elapsedMs, elapsed);
+  assert.equal(meter.getState().status, 'overflow');
+});
+
+test('a later running callback paints the overflow transition', function () {
+  const { meter, at } = harness();
+  armHighRate(meter);
+  const views = [];
+  const tick = meeting.createDisplayTick(meter, function (state) {
+    views.push(meeting.describeLiveView(state, true));
+  });
+  meter.start();
+  at(3602800);
+  tick();
+  assert.equal(views[0].label, 'Running');
+  assert.equal(views[0].liveText, '$90,070,000,000,000.00');
+  assert.equal(views[0].overflowVisible, false);
+  at(3603050);
+  tick();
+  assert.equal(views[1].label, 'Stopped');
+  assert.equal(views[1].liveText, 'Too large');
+  assert.equal(views[1].overflowVisible, true);
+  assert.equal(views[1].startDisabled, true);
+});
+
+test('resume without extra time stays running until the next callback crosses the limit', function () {
+  const { meter, at } = harness();
+  armHighRate(meter);
+  const views = [];
+  const tick = meeting.createDisplayTick(meter, function (state) {
+    views.push(meeting.describeLiveView(state, true));
+  });
+  meter.start();
+  at(3602800);
+  meter.pause();
+  tick();
+  assert.equal(views[views.length - 1].label, 'Paused');
+  assert.equal(views[views.length - 1].liveText, '$90,070,000,000,000.00');
+  meter.start();
+  tick();
+  assert.equal(views[views.length - 1].label, 'Running');
+  assert.equal(views[views.length - 1].overflowVisible, false);
+  assert.equal(views[views.length - 1].liveText, '$90,070,000,000,000.00');
+  at(3603050);
+  tick();
+  assert.equal(views[views.length - 1].label, 'Stopped');
+  assert.equal(views[views.length - 1].liveText, 'Too large');
+  assert.equal(views[views.length - 1].startDisabled, true);
+  const cleared = meter.reset();
+  assert.equal(cleared.status, 'idle');
+  assert.equal(cleared.attendees, 1);
+  assert.equal(cleared.hourlyCost, 9e13);
+  assert.equal(cleared.durationMinutes, 30);
+  assert.equal(meeting.describeLiveView(cleared, true).liveText, '$0.00');
+  assert.equal(meeting.describeLiveView(cleared, true).overflowVisible, false);
+  assert.equal(meeting.describeLiveView(cleared, true).startDisabled, false);
+});
+
+test('the page tick always paints the state returned by getState', function () {
+  const source = fs.readFileSync(path.join(__dirname, '../src/app.js'), 'utf8');
+  assert.match(source, /createDisplayTick\s*\(\s*meter\s*,\s*render\s*\)/);
+  assert.doesNotMatch(source, /followTimer/);
 });
 
 test('fractional duration is allowed and attendee fractions are not', function () {
